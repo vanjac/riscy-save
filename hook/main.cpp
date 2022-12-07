@@ -23,6 +23,7 @@ TODO:
     - Detect when file name/ext changes
     - use file name text or combobox dropdown to determine extension
 - work with any scaling mode (none, system, per monitor v1/2...)
+- automatically change filter to All Files
 
 Application bugs:
 - Glitchy drag and drop in Firefox
@@ -47,7 +48,9 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     CComPtr<IShellItemArray> droppedItems;
     DWORD adviseCookie = 0;
     UINT startTimerOnNavComplete = 0;
+
     CComPtr<IDropTargetHelper> dropTargetHelper;
+    CComPtr<IDataObject> dropObject;
 
     HICON fakeFileIcon;
     POINT iconPos;
@@ -57,6 +60,7 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
 
     void create();
     CComPtr<IExplorerBrowser> getBrowser();
+    void updateDrag(DWORD effect);
 
     // drag to box:
     void droppedDataObject(IDataObject *dataObject);
@@ -81,17 +85,22 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
 
     // IDropTarget
     STDMETHODIMP DragEnter(IDataObject *dataObject, DWORD, POINTL point, DWORD *effect) override {
+        dropObject = dataObject;
         *effect &= DROPEFFECT_LINK;
+        updateDrag(*effect);
         dropTargetHelper->DragEnter(wnd, dataObject, (POINT *)&point, *effect);
         return S_OK;
     }
     STDMETHODIMP DragOver(DWORD, POINTL point, DWORD *effect) override {
         *effect &= DROPEFFECT_LINK;
+        updateDrag(*effect);
         dropTargetHelper->DragOver((POINT *)&point, *effect);
         return S_OK;
     }
     STDMETHODIMP DragLeave() override {
+        updateDrag(DROPEFFECT_NONE);
         dropTargetHelper->DragLeave();
+        dropObject = nullptr;
         return S_OK;
     }
     STDMETHODIMP Drop(IDataObject *dataObject, DWORD, POINTL point, DWORD *effect) override {
@@ -100,6 +109,7 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
         *effect &= DROPEFFECT_LINK;
         dropTargetHelper->Drop(dataObject, (POINT *)&point, *effect);
         droppedDataObject(dataObject);
+        dropObject = nullptr;
         return S_OK;
     }
 
@@ -233,6 +243,23 @@ CComPtr<IExplorerBrowser> DropBox::getBrowser() {
         (IShellBrowser *)SendMessage(fileDialog, WM_GETISHELLBROWSER, 0, 0);
     CComQIPtr<IExplorerBrowser> explorerBrowser(shellBrowser);
     return explorerBrowser;
+}
+
+void DropBox::updateDrag(DWORD effect) {
+    DROPDESCRIPTION *dropDesc = (DROPDESCRIPTION *)GlobalAlloc(GPTR, sizeof(DROPDESCRIPTION));
+    if (effect & DROPEFFECT_LINK) {
+        dropDesc->type = DROPIMAGE_LINK;
+        GetWindowText(fileDialog, dropDesc->szMessage, _countof(dropDesc->szMessage));
+    } else {
+        dropDesc->type = DROPIMAGE_INVALID;
+        dropDesc->szMessage[0] = 0;
+    }
+    dropDesc->szInsert[0] = 0;
+    FORMATETC format = { (CLIPFORMAT)RegisterClipboardFormat(CFSTR_DROPDESCRIPTION),
+        nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM med = { TYMED_HGLOBAL };
+    med.hGlobal = dropDesc;
+    dropObject->SetData(&format, &med, true);
 }
 
 void DropBox::droppedDataObject(IDataObject *dataObject) {
