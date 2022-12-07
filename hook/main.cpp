@@ -12,6 +12,7 @@
 #include <atlbase.h>
 
 #pragma comment(lib, "User32.lib")
+#pragma comment(lib, "Gdi32.lib")
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "Ole32.lib")
 #pragma comment(lib, "Shell32.lib")
@@ -20,6 +21,7 @@
 TODO:
 - Get file name including extension (even if hidden)
     - Detect when file name/ext changes
+    - use file name text or combobox dropdown to determine extension
 - work with any scaling mode (none, system, per monitor v1/2...)
 
 Application bugs:
@@ -38,13 +40,16 @@ const UINT TIMER_SELECT_DROPPED = 0x88880001;
 const UINT TIMER_CONFIRM_SELECTION = 0x88880002;
 const UINT TIMER_CONFIRM_NAME = 0x88880003;
 
-struct DropBox : IUnknownImpl, IDropTarget, IDropSource, IExplorerBrowserEvents {
+struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     HWND wnd = nullptr;
     HWND fileDialog = nullptr;
     bool fileDialogShown = false;
     CComPtr<IShellItemArray> droppedItems;
     DWORD adviseCookie = 0;
     UINT startTimerOnNavComplete = 0;
+
+    HICON fakeFileIcon;
+    POINT iconPos;
 
     DropBox(HWND fileDialog)
         : fileDialog(fileDialog) {}
@@ -67,7 +72,6 @@ struct DropBox : IUnknownImpl, IDropTarget, IDropSource, IExplorerBrowserEvents 
     STDMETHODIMP QueryInterface(REFIID id, void **obj) override {
         static const QITAB interfaces[] = {
             QITABENT(DropBox, IDropTarget),
-            QITABENT(DropBox, IDropSource),
             QITABENT(DropBox, IExplorerBrowserEvents),
             {},
         };
@@ -90,18 +94,6 @@ struct DropBox : IUnknownImpl, IDropTarget, IDropSource, IExplorerBrowserEvents 
         droppedDataObject(dataObject);
         *effect &= DROPEFFECT_LINK;
         return S_OK;
-    }
-
-    // IDropSource
-    STDMETHODIMP QueryContinueDrag(BOOL escapePressed, DWORD keyState) override {
-        if (escapePressed || (keyState & MK_RBUTTON))
-            return DRAGDROP_S_CANCEL;
-        if (!(keyState & MK_LBUTTON))
-            return DRAGDROP_S_DROP;
-        return S_OK;
-    }
-    STDMETHODIMP GiveFeedback(DWORD) override {
-        return DRAGDROP_S_USEDEFAULTCURSORS;
     }
 
     // IExplorerBrowserEvents
@@ -175,13 +167,26 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_NCDESTROY:
             self->Release();
             break;
-        case WM_CREATE:
+        case WM_CREATE: {
             SetWindowSubclass(self->fileDialog, fileDialogSubclassProc, 0, (DWORD_PTR)self);
             RegisterDragDrop(wnd, self);
+            SHSTOCKICONINFO iconInfo = {sizeof(iconInfo)};
+            SHGetStockIconInfo(SIID_DOCNOASSOC, SHGSI_ICON | SHGSI_LARGEICON | SHGSI_SHELLICONSIZE,
+                &iconInfo);
+            self->fakeFileIcon = iconInfo.hIcon;
+            HIMAGELIST largeIml = nullptr, smallIml = nullptr;
+            Shell_GetImageLists(&largeIml, &smallIml);
+            int iconWidth, iconHeight;
+            ImageList_GetIconSize(largeIml, &iconWidth, &iconHeight);
+            CREATESTRUCT *create = (CREATESTRUCT *)lParam;
+            self->iconPos.x = (create->cx - iconWidth) / 2;
+            self->iconPos.y = (create->cy - iconHeight) / 2;
             break;
+        }
         case WM_DESTROY:
             RemoveWindowSubclass(self->fileDialog, fileDialogSubclassProc, 0);
             RevokeDragDrop(wnd);
+            DestroyIcon(self->fakeFileIcon);
             break;
         case WM_CLOSE:
             return 0; // no
@@ -192,12 +197,18 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_LBUTTONDOWN: {
             POINT cursor = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             if (DragDetect(wnd, cursor)) {
-                ScreenToClient(wnd, &cursor);
                 self->dragFakeFile(cursor);
             } else {
                 SetActiveWindow(wnd);
             }
             break;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT paint;
+            BeginPaint(wnd, &paint);
+            DrawIconEx(paint.hdc, self->iconPos.x, self->iconPos.y, self->fakeFileIcon,
+                0, 0, 0, nullptr, DI_NORMAL);
+            EndPaint(wnd, &paint);
         }
     }
     return DefWindowProc(wnd, message, wParam, lParam);
@@ -205,7 +216,7 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
 
 void DropBox::create() {
     CreateWindow(DROP_BOX_CLASS, nullptr, WS_POPUP | WS_DLGFRAME,
-        0, 0, 150, 150, fileDialog, nullptr, gModule, this);
+        0, 0, 120, 120, fileDialog, nullptr, gModule, this);
 }
 
 CComPtr<IExplorerBrowser> DropBox::getBrowser() {
@@ -276,7 +287,7 @@ void DropBox::confirmSelection() {
         folderView->InvokeVerbOnSelection(nullptr); // TODO does this work for folders?
 }
 
-void DropBox::dragFakeFile(POINT) {
+void DropBox::dragFakeFile(POINT cursor) {
     wchar_t tempPath[MAX_PATH];
     DWORD pathLen = GetTempPath(_countof(tempPath), tempPath);
     if (pathLen + _countof(TEMP_FOLDER_NAME) + 1 >= _countof(tempPath))
@@ -292,13 +303,29 @@ void DropBox::dragFakeFile(POINT) {
     if (FAILED(tempItem->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(&dataObject))))
         return;
 
+    // set drag image...
+    CComPtr<IDragSourceHelper> dragHelper;
+    if (SUCCEEDED(dragHelper.CoCreateInstance(CLSID_DragDropHelper))) {
+        ICONINFO iconInfo = {};
+        GetIconInfo(fakeFileIcon, &iconInfo);
+        BITMAP colorBitmap = {};
+        GetObject(iconInfo.hbmColor, sizeof(colorBitmap), &colorBitmap);
+        SHDRAGIMAGE dragImage = {};
+        dragImage.sizeDragImage = {colorBitmap.bmWidth, colorBitmap.bmHeight};
+        dragImage.ptOffset = {cursor.x - iconPos.x, cursor.y - iconPos.y};
+        dragImage.hbmpDragImage = iconInfo.hbmColor;
+        dragHelper->InitializeFromBitmap(&dragImage, dataObject);
+        DeleteBitmap(iconInfo.hbmColor);
+        DeleteBitmap(iconInfo.hbmMask);
+    }
+
     HANDLE mailSlot = CreateMailslot(MAIL_SLOT_NAME, 0, 1000, nullptr);
     if (mailSlot == INVALID_HANDLE_VALUE) {
         debugOut(L"Couldn't create mailslot: %d\n", GetLastError());
         return;
     }
     DWORD effect;
-    if (DoDragDrop(dataObject, this, DROPEFFECT_MOVE, &effect) == DRAGDROP_S_DROP) {
+    if (SHDoDragDrop(nullptr, dataObject, nullptr, DROPEFFECT_MOVE, &effect) == DRAGDROP_S_DROP) {
         OVERLAPPED overlap = {};
         overlap.hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         char message[424]; // max length of mailslot message
@@ -335,6 +362,7 @@ void DropBox::draggedFakeFile(wchar_t *path) {
 }
 
 void DropBox::confirmName() {
+    // TODO make sure to deselect first in case the previous folder is selected
     PostMessage(fileDialog, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
         (LPARAM)GetDlgItem(fileDialog, IDOK));
 }
