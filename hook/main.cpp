@@ -47,6 +47,7 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     CComPtr<IShellItemArray> droppedItems;
     DWORD adviseCookie = 0;
     UINT startTimerOnNavComplete = 0;
+    CComPtr<IDropTargetHelper> dropTargetHelper;
 
     HICON fakeFileIcon;
     POINT iconPos;
@@ -79,20 +80,26 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     }
 
     // IDropTarget
-    STDMETHODIMP DragEnter(IDataObject *, DWORD, POINTL, DWORD *effect) override {
+    STDMETHODIMP DragEnter(IDataObject *dataObject, DWORD, POINTL point, DWORD *effect) override {
         *effect &= DROPEFFECT_LINK;
+        dropTargetHelper->DragEnter(wnd, dataObject, (POINT *)&point, *effect);
         return S_OK;
     }
-    STDMETHODIMP DragOver(DWORD, POINTL, DWORD *effect) override {
+    STDMETHODIMP DragOver(DWORD, POINTL point, DWORD *effect) override {
         *effect &= DROPEFFECT_LINK;
+        dropTargetHelper->DragOver((POINT *)&point, *effect);
         return S_OK;
     }
-    STDMETHODIMP DragLeave() override { return S_OK; }
-    STDMETHODIMP Drop(IDataObject *dataObject, DWORD, POINTL, DWORD *effect) override {
+    STDMETHODIMP DragLeave() override {
+        dropTargetHelper->DragLeave();
+        return S_OK;
+    }
+    STDMETHODIMP Drop(IDataObject *dataObject, DWORD, POINTL point, DWORD *effect) override {
         // https://devblogs.microsoft.com/oldnewthing/20100503-00/?p=14183
         // https://devblogs.microsoft.com/oldnewthing/20130204-00/?p=5363
-        droppedDataObject(dataObject);
         *effect &= DROPEFFECT_LINK;
+        dropTargetHelper->Drop(dataObject, (POINT *)&point, *effect);
+        droppedDataObject(dataObject);
         return S_OK;
     }
 
@@ -170,6 +177,8 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_CREATE: {
             SetWindowSubclass(self->fileDialog, fileDialogSubclassProc, 0, (DWORD_PTR)self);
             RegisterDragDrop(wnd, self);
+            self->dropTargetHelper.CoCreateInstance(CLSID_DragDropHelper);
+
             SHSTOCKICONINFO iconInfo = {sizeof(iconInfo)};
             SHGetStockIconInfo(SIID_DOCNOASSOC, SHGSI_ICON | SHGSI_LARGEICON | SHGSI_SHELLICONSIZE,
                 &iconInfo);
