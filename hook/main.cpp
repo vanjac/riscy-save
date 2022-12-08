@@ -288,7 +288,7 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
             break;
         case WM_LBUTTONDOWN: {
             POINT cursor = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            if (DragDetect(wnd, cursor)) {
+            if (self->fileName[0] && DragDetect(wnd, cursor)) {
                 self->dragFakeFile(cursor);
             } else {
                 SetActiveWindow(wnd);
@@ -298,13 +298,15 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_PAINT: {
             PAINTSTRUCT paint;
             BeginPaint(wnd, &paint);
-            DrawIconEx(paint.hdc, self->iconRect.left, self->iconRect.top, self->fakeFileIcon,
-                0, 0, 0, nullptr, DI_NORMAL);
-            RECT clientRect = {};
-            GetClientRect(wnd, &clientRect);
-            RECT labelRect = {0, self->iconRect.bottom, clientRect.right, clientRect.bottom};
-            DrawText(paint.hdc, self->fileName, -1, &labelRect,
-                DT_CENTER | DT_TOP | DT_WORDBREAK | DT_WORD_ELLIPSIS | DT_NOPREFIX);
+            if (self->fileName[0]) {
+                DrawIconEx(paint.hdc, self->iconRect.left, self->iconRect.top, self->fakeFileIcon,
+                    0, 0, 0, nullptr, DI_NORMAL);
+                RECT clientRect = {};
+                GetClientRect(wnd, &clientRect);
+                RECT labelRect = {0, self->iconRect.bottom, clientRect.right, clientRect.bottom};
+                DrawText(paint.hdc, self->fileName, -1, &labelRect,
+                    DT_CENTER | DT_TOP | DT_WORDBREAK | DT_WORD_ELLIPSIS | DT_NOPREFIX);
+            }
             EndPaint(wnd, &paint);
         }
     }
@@ -325,6 +327,8 @@ CComPtr<IExplorerBrowser> DropBox::getBrowser() {
 
 void DropBox::updateFileName() {
     GetWindowText(fileNameCtl, fileName, _countof(fileName));
+    if (PathCleanupSpec(nullptr, fileName) & (PCS_REPLACEDCHAR | PCS_REMOVEDCHAR))
+        fileName[0] = 0; // not a valid filename
     RedrawWindow(wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
 
