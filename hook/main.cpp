@@ -19,11 +19,8 @@
 
 /*
 TODO:
-- Get file name including extension (even if hidden)
-    - Detect when file name/ext changes
-    - use file name text or combobox dropdown to determine extension
 - work with any scaling mode (none, system, per monitor v1/2...)
-- automatically change filter to All Files when file dropped (enter * in name box)
+- automatically change filter to All Files before opening/saving (enter * in name box)
 
 Application bugs:
 - Glitchy drag and drop in Firefox
@@ -327,8 +324,16 @@ CComPtr<IExplorerBrowser> DropBox::getBrowser() {
 
 void DropBox::updateFileName() {
     GetWindowText(fileNameCtl, fileName, _countof(fileName));
-    if (PathCleanupSpec(nullptr, fileName) & (PCS_REPLACEDCHAR | PCS_REMOVEDCHAR))
+    if (PathCleanupSpec(nullptr, fileName) & (PCS_REPLACEDCHAR | PCS_REMOVEDCHAR)) {
         fileName[0] = 0; // not a valid filename
+    } else {
+        SHFILEINFO fileInfo = {};
+        if (SHGetFileInfo(fileName, FILE_ATTRIBUTE_NORMAL, &fileInfo, sizeof(fileInfo),
+                SHGFI_USEFILEATTRIBUTES | SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE)) {
+            DestroyIcon(fakeFileIcon);
+            fakeFileIcon = fileInfo.hIcon;
+        }
+    }
     RedrawWindow(wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
 
