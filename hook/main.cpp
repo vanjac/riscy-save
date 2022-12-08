@@ -23,7 +23,7 @@ TODO:
     - Detect when file name/ext changes
     - use file name text or combobox dropdown to determine extension
 - work with any scaling mode (none, system, per monitor v1/2...)
-- automatically change filter to All Files
+- automatically change filter to All Files when file dropped (enter * in name box)
 
 Application bugs:
 - Glitchy drag and drop in Firefox
@@ -32,6 +32,10 @@ Application bugs:
 const wchar_t DROP_BOX_CLASS[] = L"Riscy Save Box";
 // undocumented message to get pointer to IShellBrowser
 const UINT WM_GETISHELLBROWSER = WM_USER + 7;
+// dialog control ids
+const int DLG_VISTA_SAVE_FILENAME = 1001; // Edit
+const int DLG_FILENAME_COMBO = 1148;
+const int DLG_FILENAME_EDIT = 1152; // win95 style dialogs without a combo box
 
 static HMODULE gModule;
 // custom messages (can't use WM_USER or WM_APP)
@@ -45,6 +49,9 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     HWND wnd = nullptr;
     HWND fileDialog = nullptr;
     bool fileDialogShown = false;
+    HWND fileNameCtl = nullptr; // could be Edit or ComboBox
+    wchar_t fileName[MAX_PATH];
+
     CComPtr<IShellItemArray> droppedItems;
     DWORD adviseCookie = 0;
     UINT startTimerOnNavComplete = 0;
@@ -53,13 +60,14 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     CComPtr<IDataObject> dropObject;
 
     HICON fakeFileIcon;
-    POINT iconPos;
+    RECT iconRect;
 
     DropBox(HWND fileDialog)
         : fileDialog(fileDialog) {}
 
     void create();
     CComPtr<IExplorerBrowser> getBrowser();
+    void updateFileName();
     void updateDrag(DWORD effect);
 
     // drag to box:
@@ -127,6 +135,42 @@ struct DropBox : IUnknownImpl, IDropTarget, IExplorerBrowserEvents {
     STDMETHODIMP OnNavigationFailed(PCIDLIST_ABSOLUTE) override { return S_OK; }
 };
 
+
+struct FindDlgItemRecursiveData { int id; HWND result; };
+
+BOOL CALLBACK findDlgItemRecursiveProc(HWND wnd, LPARAM param) {
+    FindDlgItemRecursiveData *data = (FindDlgItemRecursiveData *)param;
+    if (GetDlgCtrlID(wnd) == data->id) {
+        data->result = wnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND findDlgItemRecursive(HWND root, int id) {
+    FindDlgItemRecursiveData data = {id, nullptr};
+    EnumChildWindows(root, findDlgItemRecursiveProc, (LPARAM)&data);
+    return data.result;
+}
+
+
+LRESULT CALLBACK fileNameEditProc(HWND wnd, UINT message,
+        WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR refData) {
+    DropBox *self = (DropBox *)refData;
+    LRESULT res = DefSubclassProc(wnd, message, wParam, lParam);
+    if (message == WM_SETTEXT)
+        self->updateFileName();
+    return res;
+}
+
+LRESULT CALLBACK fileNameComboBoxProc(HWND wnd, UINT message,
+        WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR refData) {
+    DropBox *self = (DropBox *)refData;
+    if (message == WM_COMMAND && (HWND)lParam == self->fileNameCtl && HIWORD(wParam) == EN_CHANGE)
+        self->updateFileName();
+    return DefSubclassProc(wnd, message, wParam, lParam);
+}
+
 LRESULT CALLBACK fileDialogSubclassProc(HWND wnd, UINT message,
         WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR refData) {
     DropBox *self = (DropBox *)refData;
@@ -162,9 +206,32 @@ LRESULT CALLBACK fileDialogSubclassProc(HWND wnd, UINT message,
                     return 0;
             }
             break;
+        case WM_COMMAND: {
+            int cmd = HIWORD(wParam);
+            if ((HWND)lParam == self->fileNameCtl
+                    && (cmd == CBN_EDITCHANGE || cmd == CBN_SELCHANGE || cmd == EN_CHANGE)) {
+                self->updateFileName();
+            }
+            break;
+        }
     }
     if (message == MSG_FILE_DIALOG_READY) {
         ShowWindow(self->wnd, SW_SHOWNORMAL);
+        self->fileNameCtl = GetDlgItem(self->fileDialog, DLG_FILENAME_COMBO);
+        if (!self->fileNameCtl)
+            self->fileNameCtl = GetDlgItem(self->fileDialog, DLG_FILENAME_EDIT);
+        if (!self->fileNameCtl) {
+            self->fileNameCtl = findDlgItemRecursive(self->fileDialog, DLG_VISTA_SAVE_FILENAME);
+            SetWindowSubclass(self->fileNameCtl, fileNameEditProc, 0, (DWORD_PTR)self);
+            SetWindowSubclass(GetParent(self->fileNameCtl),
+                fileNameComboBoxProc, 0, (DWORD_PTR)self);
+        }
+        if (self->fileNameCtl) {
+            self->updateFileName();
+        } else {
+            debugOut(L"Failed to find filename box!\n");
+            self->fileName[0] = 0;
+        }
         return 0;
     }
     return DefSubclassProc(wnd, message, wParam, lParam);
@@ -198,11 +265,17 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
             int iconWidth, iconHeight;
             ImageList_GetIconSize(largeIml, &iconWidth, &iconHeight);
             CREATESTRUCT *create = (CREATESTRUCT *)lParam;
-            self->iconPos.x = (create->cx - iconWidth) / 2;
-            self->iconPos.y = (create->cy - iconHeight) / 2;
+            self->iconRect.left = (create->cx - iconWidth) / 2;
+            self->iconRect.top = (create->cy - iconHeight) / 4;
+            self->iconRect.right = self->iconRect.left + iconWidth;
+            self->iconRect.bottom = self->iconRect.top + iconHeight;
             break;
         }
         case WM_DESTROY:
+            if (self->fileNameCtl) {
+                RemoveWindowSubclass(self->fileNameCtl, fileNameEditProc, 0);
+                RemoveWindowSubclass(GetParent(self->fileNameCtl), fileNameComboBoxProc, 0);
+            }
             RemoveWindowSubclass(self->fileDialog, fileDialogSubclassProc, 0);
             RevokeDragDrop(wnd);
             DestroyIcon(self->fakeFileIcon);
@@ -225,8 +298,13 @@ LRESULT CALLBACK dropBoxProc(HWND wnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_PAINT: {
             PAINTSTRUCT paint;
             BeginPaint(wnd, &paint);
-            DrawIconEx(paint.hdc, self->iconPos.x, self->iconPos.y, self->fakeFileIcon,
+            DrawIconEx(paint.hdc, self->iconRect.left, self->iconRect.top, self->fakeFileIcon,
                 0, 0, 0, nullptr, DI_NORMAL);
+            RECT clientRect = {};
+            GetClientRect(wnd, &clientRect);
+            RECT labelRect = {0, self->iconRect.bottom, clientRect.right, clientRect.bottom};
+            DrawText(paint.hdc, self->fileName, -1, &labelRect,
+                DT_CENTER | DT_TOP | DT_WORDBREAK | DT_WORD_ELLIPSIS | DT_NOPREFIX);
             EndPaint(wnd, &paint);
         }
     }
@@ -243,6 +321,11 @@ CComPtr<IExplorerBrowser> DropBox::getBrowser() {
         (IShellBrowser *)SendMessage(fileDialog, WM_GETISHELLBROWSER, 0, 0);
     CComQIPtr<IExplorerBrowser> explorerBrowser(shellBrowser);
     return explorerBrowser;
+}
+
+void DropBox::updateFileName() {
+    GetWindowText(fileNameCtl, fileName, _countof(fileName));
+    RedrawWindow(wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
 
 void DropBox::updateDrag(DWORD effect) {
@@ -348,7 +431,7 @@ void DropBox::dragFakeFile(POINT cursor) {
         GetObject(iconInfo.hbmColor, sizeof(colorBitmap), &colorBitmap);
         SHDRAGIMAGE dragImage = {};
         dragImage.sizeDragImage = {colorBitmap.bmWidth, colorBitmap.bmHeight};
-        dragImage.ptOffset = {cursor.x - iconPos.x, cursor.y - iconPos.y};
+        dragImage.ptOffset = {cursor.x - iconRect.left, cursor.y - iconRect.top};
         dragImage.hbmpDragImage = iconInfo.hbmColor;
         dragHelper->InitializeFromBitmap(&dragImage, dataObject);
         DeleteBitmap(iconInfo.hbmColor);
@@ -450,6 +533,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
             wndClass.lpszClassName = DROP_BOX_CLASS;
             wndClass.lpfnWndProc = dropBoxProc;
             wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+            wndClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
             wndClass.hInstance = module;
             RegisterClass(&wndClass);
             break;
