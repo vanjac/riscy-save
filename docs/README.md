@@ -8,4 +8,4 @@ This works especially well with my file manager [ChromaFiler](https://chroma.zon
 
 The extension is compatible with any program that uses the common dialog boxes, including both the old Windows 95 style boxes and the modern Vista style.
 
-RISCy Save is currently unfinished but the basic functionality is complete. At the moment you will need to build the source code yourself.
+RISCy Save is currently unfinished but the basic functionality is complete. At the moment you will need to build the source code yourself to try it. Check back soon for a downloadable version.
