@@ -6,4 +6,6 @@ RISCy Save is an extension for Windows that enhances the standard open/save dial
 
 This works especially well with my file manager [ChromaFiler](https://chroma.zone/chromafiler/), which allows you to have a set of folders pinned to your taskbar for quick access.
 
+The extension is compatible with any program that uses the common dialog boxes, including both the old Windows 95 style boxes and the modern Vista style.
+
 RISCy Save is currently unfinished but the basic functionality is complete. At the moment you will need to build the source code yourself.
